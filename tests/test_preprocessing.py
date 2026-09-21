@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from src.nids.preprocessing import encode_labels, smote_knn_augment
+from src.nids.preprocessing import RARE_CLASS_LABEL, encode_labels, merge_rare_classes, smote_knn_augment
 
 
 def test_no_inf_values(preprocessed_data):
@@ -106,3 +106,20 @@ def test_encode_labels_preserves_val_only_attack_types():
     assert (df_val["Label"] == "DoS Hulk").sum() == 3
     assert (df_val["Label"] == "Heartbleed").sum() == 2
     assert (df_val["Label"] != "BENIGN").sum() == 5
+
+
+def test_merge_rare_classes_below_threshold():
+    df = pd.DataFrame({"Label": ["BENIGN"] * 20 + ["FTP-Patator"] * 10 + ["Heartbleed"] * 3})
+    merged = merge_rare_classes(df, min_count=5)
+    assert (merged["Label"] == "Heartbleed").sum() == 0
+    assert (merged["Label"] == RARE_CLASS_LABEL).sum() == 3
+    # Classes at/above the threshold must be untouched.
+    assert (merged["Label"] == "BENIGN").sum() == 20
+    assert (merged["Label"] == "FTP-Patator").sum() == 10
+
+
+def test_merge_rare_classes_noop_when_nothing_rare():
+    df = pd.DataFrame({"Label": ["BENIGN"] * 20 + ["FTP-Patator"] * 10})
+    merged = merge_rare_classes(df, min_count=5)
+    assert set(merged["Label"]) == {"BENIGN", "FTP-Patator"}
+    assert RARE_CLASS_LABEL not in set(merged["Label"])

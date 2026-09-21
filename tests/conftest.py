@@ -145,6 +145,16 @@ def synthetic_csv_dir(tmp_path_factory) -> Path:
     return out_dir
 
 
+@pytest.fixture(scope="session")
+def synthetic_csv_dir_all_days(tmp_path_factory) -> Path:
+    """Writes all seven synthetic day CSVs, for testing pooled (not per-day) loading."""
+    out_dir = tmp_path_factory.mktemp("cic_ids2017_all_days")
+    for day in range(1, 8):
+        df = _make_raw_frame(60, seed=SEED + day)
+        df.to_csv(out_dir / DAY_FILES[day], index=False)
+    return out_dir
+
+
 def _clean(df_raw: pd.DataFrame, day: int) -> pd.DataFrame:
     df = df_raw.copy()
     df.columns = df.columns.str.strip()
