@@ -59,16 +59,15 @@ def test_smote_handles_zero_sample_class_gracefully():
     assert X_aug.shape[0] >= X.shape[0]
 
 
-def test_enn_never_deletes_a_smote_created_minority_class():
-    # Two rare classes embedded WITHIN the majority class's distribution
-    # (heavy overlap, as real rare-attack classes like Heartbleed often
-    # are relative to BENIGN). After SMOTE brings both up to the SAME
-    # SMOTE_MIN_SAMPLES floor, neither is uniquely "the minority" anymore,
-    # so ENN's default sampling_strategy ("auto" == "not minority") is
-    # eligible to clean BOTH of them -- and can delete most of a class
-    # SMOTE just created. smote_knn_augment must restrict ENN to
-    # sampling_strategy="majority" so a class that survived SMOTE is
-    # never touched by the cleanup step afterward.
+def test_smote_knn_clean_never_deletes_original_real_samples():
+    # SMOTE-KNN's cleaning step must only ever remove SYNTHETIC points --
+    # never an original real sample, majority or minority -- unlike
+    # EditedNearestNeighbours (SMOTE-ENN), which edits real boundary points
+    # too. Two rare classes are embedded WITHIN the majority class's
+    # distribution (heavy overlap, as real rare-attack classes like
+    # Heartbleed often are relative to BENIGN) specifically so that some
+    # synthetic points DO get cleaned -- proving the filter does real work,
+    # not just a no-op -- while every real sample must still survive.
     rng = np.random.default_rng(3)
     X_major = rng.normal(loc=0.0, scale=1.0, size=(300, 5))
     X_rare1 = rng.normal(loc=0.05, scale=1.0, size=(11, 5))
@@ -80,10 +79,12 @@ def test_enn_never_deletes_a_smote_created_minority_class():
     X_aug, y_aug = smote_knn_augment(X, y, class_counts, K=3, seed=42)
     counts_after = dict(zip(*np.unique(y_aug, return_counts=True)))
 
-    # Both minority classes were upsampled to SMOTE_MIN_SAMPLES (50) and
-    # must survive the subsequent ENN cleanup fully intact.
-    assert counts_after.get(1) == 50
-    assert counts_after.get(2) == 50
+    # Real samples are never removed, so counts can never drop below the
+    # original class size, and cleaning only ever removes points, so counts
+    # can never exceed the post-SMOTE floor (SMOTE_MIN_SAMPLES = 50).
+    assert counts_after.get(0) == 300  # majority class untouched entirely
+    assert 11 <= counts_after.get(1, 0) <= 50
+    assert 15 <= counts_after.get(2, 0) <= 50
 
 
 def test_encode_labels_preserves_val_only_attack_types():

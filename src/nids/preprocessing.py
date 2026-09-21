@@ -5,7 +5,7 @@ Handles CIC-IDS2017 numeric pathologies (inf values from flow-rate ratios,
 extreme outliers) with a train-fit / val-test-transform contract to avoid
 temporal leakage, and provides a two-branch imbalance strategy:
   Branch A (raw, class-weighted)      -> used by BiLSTM / sequence models
-  Branch B (SMOTE+ENN augmented)      -> used by RF / XGBoost tabular models
+  Branch B (SMOTE-KNN augmented)      -> used by RF / XGBoost tabular models
 """
 from __future__ import annotations
 
@@ -158,12 +158,23 @@ def smote_knn_augment(
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Augment minority classes (count < SMOTE_MIN_SAMPLES) with SMOTE, then
-    clean borderline/noisy points with Edited Nearest Neighbours. Falls back
-    to the original arrays if SMOTE cannot run (e.g. too few neighbours).
+    clean with SMOTE-KNN: a k-NN misclassification filter applied ONLY to
+    the synthetic points SMOTE just created. A synthetic point is dropped
+    if the majority of its own k nearest neighbours (in the full augmented
+    set) disagree with its class; every original real sample -- majority
+    or minority -- is always kept.
+
+    This is deliberately NOT Edited Nearest Neighbours (SMOTE-ENN): ENN
+    edits real majority/minority points near the class boundary too and
+    can delete a large share of the very minority samples SMOTE just
+    synthesised. SMOTE-KNN's narrower scope (synthetic-only, misclassified-
+    only) preserves more minority-class points near the boundary, which is
+    the reason it -- not SMOTE-ENN -- is the specified imbalance strategy
+    for the tabular (RF/XGBoost) branch here.
     """
     try:
         from imblearn.over_sampling import SMOTE
-        from imblearn.under_sampling import EditedNearestNeighbours
+        from sklearn.neighbors import NearestNeighbors
 
         minority_classes = [c for c, n in class_counts.items() if 0 < n < SMOTE_MIN_SAMPLES]
         if not minority_classes:
@@ -184,29 +195,33 @@ def smote_knn_augment(
         X_res, y_res = smote.fit_resample(X_train, y_train)
         counts_after_smote = dict(zip(*np.unique(y_res, return_counts=True)))
 
-        enn_neighbors = min(ENN_N_NEIGHBORS, len(X_res) - 1)
-        if enn_neighbors >= 1:
-            # sampling_strategy="majority": ENN cleans ONLY the single most
-            # frequent class. The default ("auto" == "not minority") cleans
-            # every class except the single globally-smallest one; once
-            # SMOTE has brought several rare classes up to the SAME
-            # SMOTE_MIN_SAMPLES floor, none of them is uniquely "the
-            # minority" anymore, so "not minority" was cleaning (and could
-            # fully delete) the very rare classes SMOTE had just created --
-            # e.g. an 11-sample class SMOTE'd to 50 could be edited away
-            # again by ENN if its neighborhood is dominated by the majority
-            # class. Restricting ENN to the majority class only removes
-            # majority-class points near the decision boundary, which is
-            # ENN's actual purpose here, and never touches a minority class.
-            enn = EditedNearestNeighbours(sampling_strategy="majority", n_neighbors=enn_neighbors)
-            X_res, y_res = enn.fit_resample(X_res, y_res)
+        # imblearn's oversamplers place all original samples first, in
+        # their original order, then append the newly synthesised samples
+        # -- so rows at/after n_original are exactly the synthetic points.
+        n_original = len(X_train)
+        clean_neighbors = min(ENN_N_NEIGHBORS, len(X_res) - 1)
+        if len(X_res) > n_original and clean_neighbors >= 1:
+            synthetic_idx = np.arange(n_original, len(X_res))
+            nn = NearestNeighbors(n_neighbors=clean_neighbors + 1).fit(X_res)
+            _, neighbor_idx = nn.kneighbors(X_res[synthetic_idx])
 
-        counts_after_enn = dict(zip(*np.unique(y_res, return_counts=True)))
-        print("[smote_knn_augment] class counts (train -> after SMOTE -> after ENN):")
-        for c in sorted(set(class_counts) | set(counts_after_smote) | set(counts_after_enn)):
-            print(f"  class {c}: {class_counts.get(c, 0)} -> {counts_after_smote.get(c, 0)} -> {counts_after_enn.get(c, 0)}")
+            keep_mask = np.ones(len(X_res), dtype=bool)
+            for point_idx, neighbors in zip(synthetic_idx, neighbor_idx):
+                # neighbors[0] is the point itself (distance 0); use the
+                # next `clean_neighbors` as its actual neighbourhood.
+                neighbor_labels = y_res[neighbors[1 : clean_neighbors + 1]]
+                majority_label = np.bincount(neighbor_labels).argmax()
+                if majority_label != y_res[point_idx]:
+                    keep_mask[point_idx] = False
+
+            X_res, y_res = X_res[keep_mask], y_res[keep_mask]
+
+        counts_after_knn_clean = dict(zip(*np.unique(y_res, return_counts=True)))
+        print("[smote_knn_augment] class counts (train -> after SMOTE -> after KNN clean):")
+        for c in sorted(set(class_counts) | set(counts_after_smote) | set(counts_after_knn_clean)):
+            print(f"  class {c}: {class_counts.get(c, 0)} -> {counts_after_smote.get(c, 0)} -> {counts_after_knn_clean.get(c, 0)}")
 
         return X_res, y_res
     except Exception as exc:  # pragma: no cover - defensive fallback path
-        print(f"[smote_knn_augment] SMOTE/ENN failed ({exc}); returning original data.")
+        print(f"[smote_knn_augment] SMOTE/KNN-clean failed ({exc}); returning original data.")
         return X_train, y_train
