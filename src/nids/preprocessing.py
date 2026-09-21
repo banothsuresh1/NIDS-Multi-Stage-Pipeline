@@ -41,39 +41,6 @@ IDENTIFIER_COL_VARIANTS = [
 ]
 
 
-RARE_CLASS_LABEL = "Rare_Attack"
-
-
-def merge_rare_classes(
-    df: pd.DataFrame, min_count: int = 5, label_col: str = "Label"
-) -> pd.DataFrame:
-    """
-    Merge any class with fewer than min_count records into a single
-    RARE_CLASS_LABEL bucket, before any split is made.
-
-    A stratified split needs every class to have enough members to be
-    divided across partitions at all (sklearn's train_test_split raises
-    "least populated class has only 1 member" otherwise); a class with a
-    literal handful of records true-labeled elsewhere would in any case
-    be too sparse to learn or evaluate as its own class. Applied on the
-    POOLED (all 7 days) dataframe, before any split, so the decision of
-    which classes are "too rare to split" doesn't depend on which day
-    happens to be train/val/test.
-    """
-    df = df.copy()
-    counts = df[label_col].value_counts()
-    rare = counts[counts < min_count].index.tolist()
-    if rare:
-        print(f"[merge_rare_classes] Merging {len(rare)} class(es) with < {min_count} "
-              f"records each into '{RARE_CLASS_LABEL}':")
-        for c in rare:
-            print(f"  {c}: {counts[c]} records")
-        df.loc[df[label_col].isin(rare), label_col] = RARE_CLASS_LABEL
-    else:
-        print(f"[merge_rare_classes] No class has fewer than {min_count} records; nothing merged.")
-    return df
-
-
 def get_feature_cols(df: pd.DataFrame) -> List[str]:
     """
     Return all ML feature columns: numeric flow-statistic columns, excluding

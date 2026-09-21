@@ -1,6 +1,6 @@
 import numpy as np
 
-from src.nids.data_loading import load_day, load_pooled, load_split
+from src.nids.data_loading import load_day, load_split
 
 
 def test_columns_stripped(synthetic_csv_dir):
@@ -37,9 +37,3 @@ def test_load_split_concatenates_days(synthetic_csv_dir):
     df2 = load_day(2, synthetic_csv_dir)
     assert df.shape[0] == df1.shape[0] + df2.shape[0]
     assert set(df["Day"].unique()) == {1, 2}
-
-
-def test_load_pooled_concatenates_all_seven_days(synthetic_csv_dir_all_days):
-    df = load_pooled(synthetic_csv_dir_all_days)
-    assert set(df["Day"].unique()) == {1, 2, 3, 4, 5, 6, 7}
-    assert df.shape[0] > 0

@@ -68,13 +68,3 @@ def load_all_splits(dataset_dir: Path):
     df_val = load_split(VAL_DAYS, dataset_dir, label="VAL")
     df_test = load_split(TEST_DAYS, dataset_dir, label="TEST")
     return df_train, df_val, df_test
-
-
-def load_pooled(dataset_dir: Path) -> pd.DataFrame:
-    """
-    Load and concatenate ALL SEVEN day files into one pooled DataFrame,
-    for a stratified (not chronological) split downstream. The "Day"
-    column is retained for reference/audit only -- it plays no role in
-    determining train/val/test membership once pooled.
-    """
-    return load_split(sorted(DAY_FILES), dataset_dir, label="POOLED")
