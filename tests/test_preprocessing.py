@@ -1,6 +1,7 @@
 import numpy as np
+import pandas as pd
 
-from src.nids.preprocessing import smote_knn_augment
+from src.nids.preprocessing import encode_labels, smote_knn_augment
 
 
 def test_no_inf_values(preprocessed_data):
@@ -56,3 +57,25 @@ def test_smote_handles_zero_sample_class_gracefully():
     class_counts = {0: 55, 1: 5, 2: 0}
     X_aug, y_aug = smote_knn_augment(X, y, class_counts, K=3, seed=42)
     assert X_aug.shape[0] >= X.shape[0]
+
+
+def test_encode_labels_preserves_val_only_attack_types():
+    # Mirrors CIC-IDS2017's real structure: attack types are day-specific,
+    # so under a chronological split, val/test routinely contain attack
+    # labels that never appear in train. encode_labels() must NOT collapse
+    # those to BENIGN -- that's exactly the bug that made every validation
+    # session come out benign in the reported issue.
+    df_train = pd.DataFrame({"Label": ["BENIGN"] * 8 + ["FTP-Patator"] * 2})
+    df_val = pd.DataFrame({"Label": ["BENIGN"] * 5 + ["DoS Hulk"] * 3 + ["Heartbleed"] * 2})
+    df_test = pd.DataFrame({"Label": ["BENIGN"] * 5 + ["PortScan"] * 5})
+
+    le, classes, K = encode_labels(df_train, df_val, df_test)
+
+    assert "DoS Hulk" in classes
+    assert "Heartbleed" in classes
+    assert "PortScan" in classes
+    # The val rows genuinely labeled DoS Hulk/Heartbleed must still read
+    # as such after encode_labels(), not have been overwritten to BENIGN.
+    assert (df_val["Label"] == "DoS Hulk").sum() == 3
+    assert (df_val["Label"] == "Heartbleed").sum() == 2
+    assert (df_val["Label"] != "BENIGN").sum() == 5

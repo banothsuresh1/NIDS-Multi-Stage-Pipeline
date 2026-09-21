@@ -1,7 +1,67 @@
+import numpy as np
 import pandas as pd
 
-from config import MAX_SEQ_LEN, VOCAB
-from src.nids.events import assign_token, encode_sessions, sessions_to_arrays
+from config import MAX_SEQ_LEN, PAD_ID, TOKEN2ID, VOCAB, VOCAB_SIZE
+from src.nids.events import RAW_COL_PREFIX, assign_token, encode_sessions, get_col, sessions_to_arrays
+
+
+def test_no_real_token_maps_to_pad_id():
+    # id 0 is reserved for padding (sessions_to_arrays zero-pads, and
+    # build_lstm's Embedding uses mask_zero=True); a real token colliding
+    # with it would be silently masked out identically to padding.
+    assert PAD_ID not in TOKEN2ID.values()
+    assert VOCAB_SIZE == len(VOCAB) + 1
+
+
+def test_get_col_prefers_raw_snapshot_over_scaled_value():
+    # assign_token's thresholds are written in raw units. If a row carries
+    # both the (possibly MinMax-scaled) plain column and preprocess()'s
+    # "__raw__"-prefixed unscaled snapshot, get_col must read the raw
+    # snapshot -- otherwise every threshold silently breaks once the
+    # pipeline's Stage 2 output feeds Stage 5 (which is the real call
+    # pattern in the notebook).
+    row = pd.Series({
+        "Flow Duration": 0.13,  # a plausible MinMax-scaled value, NOT raw microseconds
+        RAW_COL_PREFIX + "Flow Duration": 500_000.0,  # the true raw value
+    })
+    assert get_col(row, ["Flow Duration"]) == 500_000.0
+
+
+def test_get_col_falls_back_to_plain_column_when_no_raw_snapshot():
+    row = pd.Series({"Flow Duration": 500_000.0})
+    assert get_col(row, ["Flow Duration"]) == 500_000.0
+
+
+def test_assign_token_uses_raw_magnitudes_not_scaled_ones():
+    # Reproduces the actual failure mode: a row whose flow-statistic
+    # columns have been MinMax-scaled to [0, 1] (as preprocess() does for
+    # the ML feature set) would make assign_token's duration_s collapse
+    # toward ~0 and pkt_rate explode, firing DOS_INDICATOR unconditionally
+    # if it read the scaled columns. With the raw snapshot present, it
+    # must classify by the true magnitude instead -- here, a normal
+    # bidirectional exchange with no attack signature.
+    row = pd.Series({
+        "Destination Port": 8080,
+        RAW_COL_PREFIX + "Flow Duration": 500_000.0,      # scaled equivalent might be ~0.13
+        "Flow Duration": 0.13,
+        RAW_COL_PREFIX + "Total Fwd Packets": 3.0,
+        "Total Fwd Packets": 0.05,
+        RAW_COL_PREFIX + "Total Backward Packets": 3.0,
+        "Total Backward Packets": 0.05,
+        RAW_COL_PREFIX + "Total Length of Fwd Packets": 200.0,
+        "Total Length of Fwd Packets": 0.02,
+        RAW_COL_PREFIX + "Total Length of Bwd Packets": 200.0,
+        "Total Length of Bwd Packets": 0.02,
+        RAW_COL_PREFIX + "SYN Flag Count": 0.0,
+        "SYN Flag Count": 0.0,
+        RAW_COL_PREFIX + "ACK Flag Count": 0.0,
+        "ACK Flag Count": 0.0,
+        RAW_COL_PREFIX + "FIN Flag Count": 0.0,
+        "FIN Flag Count": 0.0,
+        RAW_COL_PREFIX + "RST Flag Count": 0.0,
+        "RST Flag Count": 0.0,
+    })
+    assert assign_token(row) != "DOS_INDICATOR"
 
 
 def _row(**overrides):
@@ -73,6 +133,49 @@ def test_encode_sessions_structure(synthetic_sessions):
         break
 
 
+def test_session_label_is_attack_priority_not_majority_vote():
+    # A session where the attack flow is a MINORITY (1 attack vs 4 benign)
+    # must still be labeled with the attack, not BENIGN. A pure majority
+    # vote would erase the attack label whenever it's outnumbered within
+    # its own session -- exactly the bug that made every validation
+    # session come out BENIGN in the reported issue.
+    df = pd.DataFrame({
+        "SessionID": ["s1"] * 5,
+        "Label": ["BENIGN", "BENIGN", "BENIGN", "BENIGN", "DoS Hulk"],
+        "Destination Port": [80] * 5,
+        "Flow Duration": [500_000] * 5,
+        "Total Fwd Packets": [3] * 5,
+        "Total Backward Packets": [3] * 5,
+        "Total Length of Fwd Packets": [200] * 5,
+        "Total Length of Bwd Packets": [200] * 5,
+        "SYN Flag Count": [0] * 5,
+        "ACK Flag Count": [0] * 5,
+        "FIN Flag Count": [0] * 5,
+        "RST Flag Count": [0] * 5,
+    })
+    _, sessions_dict = encode_sessions(df)
+    assert sessions_dict["s1"]["label"] == "DoS Hulk"
+
+
+def test_session_label_all_benign_stays_benign():
+    df = pd.DataFrame({
+        "SessionID": ["s1"] * 3,
+        "Label": ["BENIGN"] * 3,
+        "Destination Port": [80] * 3,
+        "Flow Duration": [500_000] * 3,
+        "Total Fwd Packets": [3] * 3,
+        "Total Backward Packets": [3] * 3,
+        "Total Length of Fwd Packets": [200] * 3,
+        "Total Length of Bwd Packets": [200] * 3,
+        "SYN Flag Count": [0] * 3,
+        "ACK Flag Count": [0] * 3,
+        "FIN Flag Count": [0] * 3,
+        "RST Flag Count": [0] * 3,
+    })
+    _, sessions_dict = encode_sessions(df)
+    assert sessions_dict["s1"]["label"] == "BENIGN"
+
+
 def test_sessions_to_arrays_padding():
     sessions_dict = {
         "s1": {"tokens": ["CONNECTION_ATTEMPT"], "token_ids": [0], "label": "BENIGN"},
@@ -92,3 +195,28 @@ def test_sessions_to_arrays_truncation():
     le = LabelEncoder().fit(["BENIGN"])
     X, y = sessions_to_arrays(sessions_dict, le, max_len=MAX_SEQ_LEN)
     assert X.shape == (1, MAX_SEQ_LEN)
+
+
+def test_token_diversity_survives_full_preprocess_to_encode_sessions_chain(synthetic_split):
+    # Integration regression test for the actual reported failure mode:
+    # the real notebook calls reconstruct_sessions()/encode_sessions() on
+    # preprocess()'s OUTPUT (Stage 2's MinMax-scaled dataframe), not the
+    # raw one. Before the raw-magnitude-snapshot fix, this made
+    # assign_token's thresholds fire on already-scaled [0, 1] values,
+    # collapsing every session to a single degenerate token. This test
+    # chains the real stage order and asserts token diversity survives it.
+    from src.nids.preprocessing import preprocess
+    from src.nids.sessions import reconstruct_sessions
+
+    df_train, df_val, df_test = synthetic_split
+    train, val, test, scaler, feat_cols = preprocess(df_train, df_val, df_test)
+
+    df_train_sess = reconstruct_sessions(train)
+    df_train_sess_enc, sessions_train = encode_sessions(df_train_sess)
+
+    token_counts = df_train_sess_enc["Token"].value_counts()
+    assert len(token_counts) > 1, (
+        "assign_token collapsed to a single token across the whole "
+        "(post-preprocess) training set -- it is almost certainly reading "
+        "MinMax-scaled values instead of raw magnitudes."
+    )

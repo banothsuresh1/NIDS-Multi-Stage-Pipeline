@@ -80,20 +80,85 @@ def build_lstm(vocab_size: int, embed_dim: int, lstm_units: int, dropout: float,
     return model
 
 
+def build_conv1d(vocab_size: int, embed_dim: int, filters: int, kernel_size: int,
+                  dropout: float, n_classes: int, lr: float = LSTM_LR):
+    """
+    Conv1D + GlobalMaxPooling alternative to the BiLSTM. Sequences here are
+    only MAX_SEQ_LEN=20 timesteps over a ~10-token vocabulary, so the
+    signal is local motifs (a handful of adjacent tokens), not long-range
+    dependencies -- exactly what a small 1D conv is good at, and it
+    processes the whole sequence in one parallel pass instead of walking
+    it one timestep at a time like an LSTM, which is 10-50x faster on
+    CPU for inputs this short. mask_zero is not used here (Conv1D has no
+    masking support); padding contributes small, roughly-uniform noise to
+    the convolution instead of being explicitly ignored, which is a
+    reasonable tradeoff for this speed gain on 20-length sequences.
+    """
+    from tensorflow import keras
+    from tensorflow.keras import layers
+
+    from config import MAX_SEQ_LEN
+
+    model = keras.Sequential([
+        layers.Input(shape=(MAX_SEQ_LEN,)),
+        layers.Embedding(input_dim=vocab_size, output_dim=embed_dim),
+        layers.Conv1D(filters=filters, kernel_size=kernel_size, activation="relu", padding="same"),
+        layers.GlobalMaxPooling1D(),
+        layers.Dropout(dropout),
+        layers.Dense(n_classes, activation="softmax"),
+    ])
+    model.compile(
+        optimizer=keras.optimizers.Adam(learning_rate=lr),
+        loss="sparse_categorical_crossentropy",
+        metrics=["accuracy"],
+    )
+    return model
+
+
+def build_sequence_model(vocab_size: int, embed_dim: int, lstm_units: int, dropout: float,
+                          n_classes: int, lr: float = LSTM_LR, model_type: str = "bilstm",
+                          conv_filters: int = 64, conv_kernel_size: int = 3):
+    """Dispatch on config.SEQUENCE_MODEL_TYPE ("bilstm" or "conv1d")."""
+    if model_type == "conv1d":
+        return build_conv1d(vocab_size, embed_dim, conv_filters, conv_kernel_size,
+                             dropout, n_classes, lr)
+    return build_lstm(vocab_size, embed_dim, lstm_units, dropout, n_classes, lr)
+
+
 def train_lstm(model, X_train, y_train, sample_weights, X_val, y_val,
                 epochs: int, batch_size: int, patience: int):
+    """
+    Trains via tf.data (.cache() + .prefetch(AUTOTUNE)) instead of feeding
+    raw numpy arrays directly to model.fit(): this overlaps the (trivial
+    here, but nonzero) batch-assembly work with the GPU/CPU compute step
+    and avoids re-slicing the numpy arrays from scratch every epoch.
+    """
+    import tensorflow as tf
     from tensorflow import keras
+
+    train_ds = (
+        tf.data.Dataset.from_tensor_slices((X_train, y_train, sample_weights))
+        .cache()
+        .shuffle(buffer_size=min(len(X_train), 10_000), reshuffle_each_iteration=True)
+        .batch(batch_size)
+        .prefetch(tf.data.AUTOTUNE)
+    )
+    val_ds = (
+        tf.data.Dataset.from_tensor_slices((X_val, y_val))
+        .cache()
+        .batch(batch_size)
+        .prefetch(tf.data.AUTOTUNE)
+    )
 
     early_stop = keras.callbacks.EarlyStopping(
         monitor="val_loss", patience=patience, restore_best_weights=True
     )
     history = model.fit(
-        X_train, y_train,
-        sample_weight=sample_weights,
-        validation_data=(X_val, y_val),
+        train_ds,
+        validation_data=val_ds,
         epochs=epochs,
-        batch_size=batch_size,
         callbacks=[early_stop],
+        shuffle=False,  # already shuffled via tf.data .shuffle() above
         verbose=2,
     )
     return history

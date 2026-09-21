@@ -29,16 +29,45 @@ COL_VARIANTS: Dict[str, List[str]] = {
     "rst": ["RST Flag Cnt", "RST Flag Count", " RST Flag Count"],
 }
 
+# assign_token()'s rules are thresholds in raw units (packets, bytes,
+# microseconds -- e.g. "pkt_rate > 10000", "total_bytes < 100"). If the
+# dataframe it reads from has already been MinMax-scaled to [0, 1] (as
+# happens when Stage 5 runs on Stage 2's preprocessed output, not the raw
+# flow data), every one of those thresholds breaks silently -- duration
+# divided by 1e6 collapses to ~0, so pkt_rate explodes and DOS_INDICATOR
+# fires almost unconditionally regardless of true traffic behavior.
+# preprocess() (preprocessing.py) snapshots these columns under a
+# "__raw__" prefix before scaling; get_col() below prefers that snapshot
+# when present and falls back to the plain column (for callers that pass
+# an already-raw/unscaled dataframe directly, e.g. tests).
+RAW_COL_PREFIX = "__raw__"
+RAW_MAGNITUDE_COLS: List[str] = sorted({
+    name
+    for key, variants in COL_VARIANTS.items()
+    if key != "dst_port"  # an identifier column, never scaled in the first place
+    for name in variants
+})
+
 
 def get_col(row: pd.Series, names: List[str], default: float = 0.0) -> float:
-    """Try each column-name variant in order; return the first found value."""
+    """
+    Try each column-name variant in order, preferring the unscaled
+    "__raw__"-prefixed snapshot (written by preprocess()) over the plain
+    column name, since the plain column may have been MinMax-scaled for
+    ML-feature purposes by the time this row reaches assign_token().
+    """
     for name in names:
-        if name in row.index:
+        raw_name = RAW_COL_PREFIX + name
+        if raw_name in row.index:
+            val = row[raw_name]
+        elif name in row.index:
             val = row[name]
-            try:
-                return float(val)
-            except (TypeError, ValueError):
-                return default
+        else:
+            continue
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return default
     return default
 
 
@@ -84,6 +113,26 @@ def assign_token(row: pd.Series) -> str:
     return "CONNECTION_ATTEMPT"
 
 
+def _session_label(labels: pd.Series) -> str:
+    """
+    Attack-priority session labeling: if ANY flow in the session is
+    non-BENIGN, the session is labeled with the most frequent non-BENIGN
+    label among its flows; only an all-BENIGN session is labeled BENIGN.
+
+    A pure majority vote (the previous behavior) erases a session's
+    attack label whenever the attack flows are a minority within it —
+    e.g. a multi-flow session with a few malicious packets buried among
+    many benign-looking handshake/control flows would get mislabeled
+    BENIGN outright. A session containing any malicious flow is
+    malicious; that is the standard convention for session-level NIDS
+    labeling and it doesn't require majority representation.
+    """
+    non_benign = labels[labels != "BENIGN"]
+    if len(non_benign) > 0:
+        return non_benign.mode().iat[0]
+    return "BENIGN"
+
+
 def encode_sessions(df_sess: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, dict]]:
     """Apply assign_token to every row and group tokens by SessionID."""
     df = df_sess.copy()
@@ -94,7 +143,7 @@ def encode_sessions(df_sess: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, dict
     for session_id, group in df.groupby("SessionID"):
         tokens = group["Token"].tolist()
         token_ids = group["TokenID"].tolist()
-        label = group["Label"].mode().iat[0] if "Label" in group.columns else "BENIGN"
+        label = _session_label(group["Label"]) if "Label" in group.columns else "BENIGN"
         sessions_dict[session_id] = {
             "tokens": tokens,
             "token_ids": token_ids,
