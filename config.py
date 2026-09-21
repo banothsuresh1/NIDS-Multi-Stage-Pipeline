@@ -58,8 +58,16 @@ VOCAB = [
     "CONNECTION_TERMINATION", "FORCED_TERMINATION",
     "DOS_INDICATOR", "POST_AUTH_ACTIVITY",
 ]
-TOKEN2ID = {t: i for i, t in enumerate(VOCAB)}
+# Token id 0 is reserved exclusively for padding (sessions_to_arrays()
+# zero-pads short sequences, and build_lstm()'s Embedding uses
+# mask_zero=True to skip those positions). VOCAB ids therefore start at 1
+# -- if a real token also mapped to 0 (as "CONNECTION_ATTEMPT" used to,
+# being first in VOCAB), every occurrence of that token would be
+# silently masked out of the LSTM's input identically to padding.
+PAD_ID = 0
+TOKEN2ID = {t: i + 1 for i, t in enumerate(VOCAB)}
 ID2TOKEN = {i: t for t, i in TOKEN2ID.items()}
+VOCAB_SIZE = len(VOCAB) + 1  # +1 for the reserved PAD_ID; pass this to build_lstm()
 AUTH_PORTS = {22, 21, 23, 3389, 445}
 
 # ---------------------------------------------------------------------------
@@ -73,9 +81,30 @@ LSTM_EMBED_DIM = 32
 LSTM_UNITS = 128
 LSTM_DROPOUT = 0.3
 LSTM_EPOCHS = 30
-LSTM_BATCH_SIZE = 256
+# 512 amortizes per-step Python/graph-dispatch overhead far better than a
+# small batch on CPU, where LSTM timestep sequentiality (not batch size)
+# is the real bottleneck; raise toward 1024 if the machine has plenty of
+# RAM and cores. This was the single biggest lever on CPU training time.
+LSTM_BATCH_SIZE = 512
 LSTM_LR = 1e-3
 LSTM_PATIENCE = 5
+
+# "bilstm" (default, unchanged model) or "conv1d" (Conv1D + GlobalMaxPooling
+# -- typically 10-50x faster on CPU for short, small-vocabulary sequences
+# like these 20-token/10-class sessions, since it processes the whole
+# sequence in parallel instead of one timestep at a time). Switch by
+# changing this one flag; build_sequence_model() in models.py dispatches
+# on it, so nothing else in the pipeline needs to change either way.
+SEQUENCE_MODEL_TYPE = "bilstm"
+CONV1D_FILTERS = 64
+CONV1D_KERNEL_SIZE = 3
+
+# 0 = let TensorFlow use its own default. Set to the machine's physical
+# core count (not hyperthreads) to reduce oversubscription on CPU-only
+# training; see Cell 0 of the notebook for where this is applied via
+# tf.config.threading.
+TF_INTRA_OP_THREADS = 0
+TF_INTER_OP_THREADS = 0
 
 # Stage 6 - XGBoost
 XGB_N_ESTIMATORS = 300

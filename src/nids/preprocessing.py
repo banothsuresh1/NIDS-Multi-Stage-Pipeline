@@ -21,6 +21,7 @@ from config import (
     SMOTE_K_NEIGHBORS,
     SMOTE_MIN_SAMPLES,
 )
+from src.nids.events import RAW_COL_PREFIX, RAW_MAGNITUDE_COLS
 
 NON_FEATURE_COLS = {"Label", "Day", "SessionID", "Token", "TokenID", "LabelID"}
 
@@ -65,6 +66,17 @@ def preprocess(
     val = df_val.copy()
     test = df_test.copy()
 
+    # Snapshot raw (unscaled) flow-statistic magnitudes BEFORE clipping/
+    # scaling touches them. Stage 5's assign_token() reads these by
+    # magnitude (packet/byte counts, microsecond durations) with
+    # thresholds written in raw units; MinMax-scaling them in place for
+    # the ML feature set would otherwise silently break every threshold.
+    # See events.RAW_MAGNITUDE_COLS / get_col() for the consuming side.
+    for df in (train, val, test):
+        for col in RAW_MAGNITUDE_COLS:
+            if col in df.columns and pd.api.types.is_numeric_dtype(df[col]):
+                df[RAW_COL_PREFIX + col] = df[col].to_numpy(dtype=float, copy=True)
+
     for df in (train, val, test):
         df[numeric_cols] = df[numeric_cols].replace([np.inf, -np.inf], np.nan)
 
@@ -90,12 +102,30 @@ def encode_labels(
     df_train: pd.DataFrame, df_val: pd.DataFrame, df_test: pd.DataFrame
 ) -> Tuple[LabelEncoder, np.ndarray, int]:
     """
-    Fit LabelEncoder on training labels only. Unseen labels in val/test
-    (rare in CIC-IDS2017 but possible across the chronological split) are
-    mapped to the majority class "BENIGN" to keep downstream arrays valid.
+    Fit LabelEncoder on the UNION of labels seen across train/val/test.
+
+    CIC-IDS2017's attack types are day-specific (e.g. DoS/Heartbleed only
+    appear on Wednesday, Web Attack/Infiltration only on Thursday), so
+    under the chronological split (train=Days 1-2, val=Day 3, ...) most
+    of val's and test's true attack labels are GUARANTEED to be absent
+    from train. Fitting the encoder on train-only and silently remapping
+    every "unseen" label to BENIGN — the previous behavior — therefore
+    erases essentially all of val/test's genuine attack labels before any
+    downstream session labeling or metric even sees them.
+    Declaring the label vocabulary from all three splits is not temporal
+    leakage: no feature statistics or per-sample split membership are
+    used, only the set of label *strings* that exist. (Scaler fitting,
+    outlier clipping and class weights all remain train-only, as before.)
+    A defensive fallback is kept for the case of a genuinely novel label
+    appearing outside all three splits (e.g. a future streaming batch).
     """
     le = LabelEncoder()
-    le.fit(df_train["Label"].astype(str))
+    all_labels = pd.concat([
+        df_train["Label"].astype(str),
+        df_val["Label"].astype(str),
+        df_test["Label"].astype(str),
+    ])
+    le.fit(all_labels)
     classes = le.classes_
     known = set(classes)
     fallback = "BENIGN" if "BENIGN" in known else classes[0]
