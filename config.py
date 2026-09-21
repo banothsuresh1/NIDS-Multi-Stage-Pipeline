@@ -87,7 +87,7 @@ LSTM_EPOCHS = 30
 # RAM and cores. This was the single biggest lever on CPU training time.
 LSTM_BATCH_SIZE = 512
 LSTM_LR = 1e-3
-LSTM_PATIENCE = 5
+LSTM_PATIENCE = 3
 
 # "bilstm" (default, unchanged model) or "conv1d" (Conv1D + GlobalMaxPooling
 # -- typically 10-50x faster on CPU for short, small-vocabulary sequences

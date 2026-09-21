@@ -61,3 +61,19 @@ def test_reconstruct_sessions_on_full_fixture(synthetic_split):
     assert df_sess["SessionID"].notna().all()
     assert df_sess["SessionID"].nunique() > 0
     assert len(df_sess) == len(df_train)
+
+
+def test_session_id_prefix_prevents_cross_split_collisions(synthetic_split):
+    # reconstruct_sessions()'s id counter restarts at 1 on every call, so
+    # two separate calls (e.g. one per train/val/test split, as the
+    # notebook does) would otherwise produce identical SessionID strings
+    # for entirely different sessions.
+    df_train, df_val, _ = synthetic_split
+    df_train_sess = reconstruct_sessions(df_train, session_id_prefix="TRAIN_")
+    df_val_sess = reconstruct_sessions(df_val, session_id_prefix="VAL_")
+
+    train_ids = set(df_train_sess["SessionID"])
+    val_ids = set(df_val_sess["SessionID"])
+    assert train_ids.isdisjoint(val_ids)
+    assert all(sid.startswith("TRAIN_") for sid in train_ids)
+    assert all(sid.startswith("VAL_") for sid in val_ids)

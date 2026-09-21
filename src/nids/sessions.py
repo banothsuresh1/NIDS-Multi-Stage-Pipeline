@@ -57,8 +57,23 @@ def make_session_key(row: pd.Series) -> tuple:
     return (ip_lo, ip_hi, protocol, port_lo, port_hi)
 
 
-def reconstruct_sessions(df: pd.DataFrame, timeout: int = SESSION_TIMEOUT) -> pd.DataFrame:
-    """Assign SessionID to each flow row via symmetric-key + timeout grouping."""
+def reconstruct_sessions(
+    df: pd.DataFrame, timeout: int = SESSION_TIMEOUT, session_id_prefix: str = ""
+) -> pd.DataFrame:
+    """
+    Assign SessionID to each flow row via symmetric-key + timeout grouping.
+
+    session_id_prefix should be distinct per call (e.g. "TRAIN_", "VAL_",
+    "TEST_") whenever reconstruct_sessions() is called separately per
+    split, as the notebook does: the id counter restarts at 1 on every
+    call, so without a prefix train's SESS_00000001 and val's
+    SESS_00000001 are literally the same string despite being different
+    sessions. That doesn't corrupt the current pipeline (each split's
+    sessions live in separate dicts throughout), but SessionID is also
+    surfaced directly to analysts (explainability.build_evidence_report),
+    where a collision would misleadingly suggest two different sessions
+    from two different days are the same one.
+    """
     df = df.copy()
 
     ts_col = _first_present(df, TIMESTAMP_VARIANTS)
@@ -95,7 +110,7 @@ def reconstruct_sessions(df: pd.DataFrame, timeout: int = SESSION_TIMEOUT) -> pd
             gap = (ts - prev_ts).total_seconds()
             if gap > timeout:
                 current_id += 1
-        session_ids[i] = f"SESS_{current_id:08d}"
+        session_ids[i] = f"{session_id_prefix}SESS_{current_id:08d}"
         prev_key = key
         prev_ts = ts
 

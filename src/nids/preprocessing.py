@@ -182,11 +182,29 @@ def smote_knn_augment(
             random_state=seed,
         )
         X_res, y_res = smote.fit_resample(X_train, y_train)
+        counts_after_smote = dict(zip(*np.unique(y_res, return_counts=True)))
 
         enn_neighbors = min(ENN_N_NEIGHBORS, len(X_res) - 1)
         if enn_neighbors >= 1:
-            enn = EditedNearestNeighbours(n_neighbors=enn_neighbors)
+            # sampling_strategy="majority": ENN cleans ONLY the single most
+            # frequent class. The default ("auto" == "not minority") cleans
+            # every class except the single globally-smallest one; once
+            # SMOTE has brought several rare classes up to the SAME
+            # SMOTE_MIN_SAMPLES floor, none of them is uniquely "the
+            # minority" anymore, so "not minority" was cleaning (and could
+            # fully delete) the very rare classes SMOTE had just created --
+            # e.g. an 11-sample class SMOTE'd to 50 could be edited away
+            # again by ENN if its neighborhood is dominated by the majority
+            # class. Restricting ENN to the majority class only removes
+            # majority-class points near the decision boundary, which is
+            # ENN's actual purpose here, and never touches a minority class.
+            enn = EditedNearestNeighbours(sampling_strategy="majority", n_neighbors=enn_neighbors)
             X_res, y_res = enn.fit_resample(X_res, y_res)
+
+        counts_after_enn = dict(zip(*np.unique(y_res, return_counts=True)))
+        print("[smote_knn_augment] class counts (train -> after SMOTE -> after ENN):")
+        for c in sorted(set(class_counts) | set(counts_after_smote) | set(counts_after_enn)):
+            print(f"  class {c}: {class_counts.get(c, 0)} -> {counts_after_smote.get(c, 0)} -> {counts_after_enn.get(c, 0)}")
 
         return X_res, y_res
     except Exception as exc:  # pragma: no cover - defensive fallback path
