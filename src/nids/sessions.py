@@ -7,12 +7,12 @@ so that a long-idle re-use of the same 5-tuple starts a new session.
 """
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Dict, List, Set, Tuple
 
 import numpy as np
 import pandas as pd
 
-from config import SESSION_TIMEOUT
+from config import SEED, SESSION_TIMEOUT
 
 SRC_IP_VARIANTS = ["Src IP", " Source IP", "Source IP", "Src_IP"]
 DST_IP_VARIANTS = ["Dst IP", " Destination IP", "Destination IP", "Dst_IP"]
@@ -137,3 +137,81 @@ def get_session_stats(df_sess: pd.DataFrame) -> pd.DataFrame:
     stats = df_sess.groupby("SessionID").apply(_agg).reset_index()
     stats = stats.rename(columns={"SessionID": "session_id"})
     return stats
+
+
+def stratified_group_session_split(
+    sessions_dict: Dict[str, dict],
+    val_size: float = 0.15,
+    test_size: float = 0.15,
+    seed: int = SEED,
+) -> Tuple[Set[str], Set[str], Set[str]]:
+    """
+    Splits SESSIONS (not raw flows) into train/val/test via a stratified
+    70/15/15-style split on session-level label. The session is the
+    natural "group" unit here: since the split is performed at session
+    granularity and every flow's SessionID determines which partition it
+    lands in, no session (and therefore no flow) can ever straddle two
+    partitions -- sklearn's StratifiedGroupKFold machinery isn't needed
+    for a plain train/val/test split when the group IS the split unit.
+
+    A class that is rare at the flow level should already have been
+    merged into RARE_CLASS_LABEL by preprocessing.merge_rare_classes()
+    before sessions were built. Grouping flows into sessions can still
+    shrink an already-small class down further (several flows from one
+    rare attack can turn out to be part of just a handful of sessions).
+
+    Every class is guaranteed at least one session in EACH of the three
+    partitions whenever it has >= 3 total sessions (allocated first,
+    before any proportional distribution of the remainder) -- a plain
+    two-stage stratified split can otherwise leave a rare class entirely
+    out of one partition purely by which side of a 70/30 rounding it
+    happened to land on. A class with < 3 total sessions cannot possibly
+    appear in all three partitions (there's nothing left to split three
+    ways); that is reported explicitly rather than silently accepted or
+    hidden.
+    """
+    rng = np.random.default_rng(seed)
+
+    by_label: Dict[str, List[str]] = {}
+    for sid, s in sessions_dict.items():
+        by_label.setdefault(s["label"], []).append(sid)
+
+    train_ids: List[str] = []
+    val_ids: List[str] = []
+    test_ids: List[str] = []
+    undersized = []
+
+    for label, ids in by_label.items():
+        ids = list(ids)
+        rng.shuffle(ids)
+        n = len(ids)
+
+        if n < 3:
+            undersized.append((label, n))
+            # Not enough sessions to guarantee all three partitions;
+            # give train first, then val, then test, with whatever exists.
+            for i, sid in enumerate(ids):
+                (train_ids, val_ids, test_ids)[min(i, 2)].append(sid)
+            continue
+
+        # Guarantee >= 1 session of this class in each partition.
+        train_ids.append(ids[0])
+        val_ids.append(ids[1])
+        test_ids.append(ids[2])
+
+        # Distribute the remainder proportionally to the target sizes.
+        remainder = ids[3:]
+        n_val = min(round(len(remainder) * val_size), len(remainder))
+        n_test = min(round(len(remainder) * test_size), len(remainder) - n_val)
+        val_ids.extend(remainder[:n_val])
+        test_ids.extend(remainder[n_val:n_val + n_test])
+        train_ids.extend(remainder[n_val + n_test:])
+
+    if undersized:
+        print(
+            f"[stratified_group_session_split] {len(undersized)} class(es) have fewer than "
+            f"3 total sessions -- CANNOT appear in all three partitions (mathematically "
+            f"impossible to split fewer than 3 items three ways): {undersized}"
+        )
+
+    return set(train_ids), set(val_ids), set(test_ids)
